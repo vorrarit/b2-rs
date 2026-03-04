@@ -1,4 +1,4 @@
-use std::{error::Error, fs::{self, DirEntry}, io, path::PathBuf};
+use std::{fs::{self, DirEntry}, io, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use anyhow::anyhow;
@@ -37,9 +37,19 @@ enum Commands {
         #[arg(short='d', long="dest", value_name = "DESTINATION")]
         destination: PathBuf,
     },
+    DownloadFolder {
+        #[arg(short='s', long="src", value_name = "SOURCE")]
+        source: String,
+        #[arg(short='d', long="dest", value_name = "DESTINATION")]
+        destination: PathBuf,
+        #[arg(short='p', long="pattern", value_name = "PATTERN")]
+        pattern: Option<String>,
+    },
     List {
-        #[arg(short, long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE")]
         prefix: String,
+        #[arg(short='p', long="pattern", value_name = "PATTERN")]
+        pattern: Option<String>,
     },
     SetContentType {
         #[arg(short='k', long, value_name = "FILE")]
@@ -85,9 +95,13 @@ async fn main() -> Result<(), anyhow::Error> {
             info!("Downloading file: from {} to {}", source, destination.display());
             download_command(&settings, &client, source, destination).await?;
         }
-        Commands::List { prefix } => {
+        Commands::DownloadFolder { source, destination, pattern } => {
+            info!("Downloading folder: from {} to {}", source, destination.display());
+            download_folder_command(&settings, &client, source, destination, pattern.as_deref()).await?;
+        }
+        Commands::List { prefix, pattern } => {
             info!("Listing files with prefix: {}", prefix);
-            list_command(&settings, &client, prefix).await?;
+            list_command(&settings, &client, prefix, pattern.as_deref()).await?;
         }
         Commands::SetContentType { key, content_type } => {
             info!("Set Content Type: key {} content-type {}", key, content_type);
@@ -167,9 +181,54 @@ async fn download_command(settings: &settings::Settings, client: &aws_sdk_s3::Cl
     s3::download_large_file(&client, &settings.bucket_name, source, dest).await
 }
 
-async fn list_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, prefix: &str) -> Result<(), anyhow::Error> {
+async fn download_folder_command(
+    settings: &settings::Settings,
+    client: &aws_sdk_s3::Client,
+    source: &str,
+    destination: &PathBuf,
+    pattern: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Validation
+    if source.starts_with("/") {
+        return Err(anyhow!("Source must not begin with /"));
+    }
+    
+    let mut source_prefix = source.to_string();
+    // Only add trailing slash if source is not empty (empty = root folder)
+    if !source_prefix.is_empty() && !source_prefix.ends_with("/") {
+        source_prefix.push('/');
+    }
+
+    if destination.is_file() {
+        return Err(anyhow!("Destination must be a directory"));
+    }
+
+    // Create destination directory if it doesn't exist
+    if !destination.exists() {
+        fs::create_dir_all(destination)?;
+    }
+
+    let dest_str = destination.as_os_str().to_str()
+        .ok_or(anyhow!("Cannot get destination path {}", destination.display()))?;
+
+    s3::download_folder_files(
+        client,
+        &settings.bucket_name,
+        &source_prefix,
+        dest_str,
+        pattern,
+    ).await
+}
+
+async fn list_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, prefix: &str, pattern: Option<&str>) -> Result<(), anyhow::Error> {
     if prefix.starts_with("/") {
         return Err(anyhow!("Prefix must not begin with /"));
+    }
+    
+    let mut folder_prefix = prefix.to_string();
+    // Only add trailing slash if prefix is not empty (empty = root folder)
+    if !folder_prefix.is_empty() && !folder_prefix.ends_with("/") {
+        folder_prefix.push('/');
     }
 
     // let client = s3::build_s3_client(
@@ -178,7 +237,7 @@ async fn list_command(settings: &settings::Settings, client: &aws_sdk_s3::Client
     //     "ap-southeast-2",
     //     "https://s3.us-east-005.backblazeb2.com").await;
 
-    let list = s3::list_files(client, &settings.bucket_name, prefix).await?;
+    let list = s3::list_files(client, &settings.bucket_name, &folder_prefix, pattern).await?;
     info!("Files with prefix '{}':", prefix);
     for file in list {
         info!("{}", file);

@@ -9,7 +9,8 @@ use http::{HeaderValue};
 use mimetype_detector::{detect_file};
 use sha2::{Digest, Sha256};
 use tokio::{fs::{File, OpenOptions}, io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, sync::Semaphore, task::JoinSet};
-use tracing::info;
+use tracing::{error, info};
+use wildmatch::WildMatch;
 
 pub async fn build_s3_client(access_key: &str, secret_key: &str, region: &str, endpoint: &str) -> aws_sdk_s3::Client {
     let credentials = Credentials::from_keys(access_key, secret_key, None);
@@ -20,7 +21,12 @@ pub async fn build_s3_client(access_key: &str, secret_key: &str, region: &str, e
             .retry_config(RetryConfig::standard().with_reconnect_mode(ReconnectMode::ReuseAllConnections))
             .load()
             .await;
-    let client = aws_sdk_s3::Client::new(&config);
+
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        // .force_path_style(true)
+        .build();
+
+    let client = aws_sdk_s3::Client::from_conf(s3_config);
     client
 }
 
@@ -65,7 +71,7 @@ async fn get_upload_file_info(prefix: &str, source_filename: &str) -> Result<Upl
 
     let key = format!("{}{}", prefix, filename);
 
-    let mut src_file = tokio::fs::File::open(path).await.expect("Failed to open file");
+    let src_file = tokio::fs::File::open(path).await.expect("Failed to open file");
 
     Ok(UploadFileInfo {
         src_file,
@@ -225,6 +231,30 @@ pub async fn download_large_file(client: &Client, bucket: &str, prefix: &str, de
         ));
     }
 
+    // If file can be downloaded in one chunk, download directly without range
+    if chunk_count == 1 {
+        info!("Downloading file in single request: {} bytes", file_size);
+        
+        let object_res = client.get_object()
+            .bucket(bucket)
+            .key(prefix)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Download failed: {:#?}", e))?;
+
+        let data = object_res.body.collect().await.context("Failed to collect data.")?.into_bytes();
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(destination_filename)
+            .await?;
+        file.write_all(&data).await.context("Failed to write data.")?;
+
+        return Ok(());
+    }
+
+    // For large files, use range requests
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -256,9 +286,10 @@ pub async fn download_large_file(client: &Client, bucket: &str, prefix: &str, de
             let object_res = client_clone.get_object()
                 .bucket(bucket_clone)
                 .key(prefix_clone)
-                .range(range)
+                .range(range.clone())
                 .send()
-                .await.context("Download filed for specific range.")?;
+                .await
+                .map_err(|e| anyhow!("Download failed for range {}: {}", range, e.into_service_error()))?;
 
             let data = object_res.body.collect().await.context("Failed to collect data.")?.into_bytes();
 
@@ -278,6 +309,71 @@ pub async fn download_large_file(client: &Client, bucket: &str, prefix: &str, de
         res.context("Task panicked or failed to join")??;
     }
 
+    Ok(())
+}
+
+pub async fn download_folder_files(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+    destination_dir: &str,
+    pattern: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // List all objects with the given prefix (filtering already done in list_files)
+    let all_objects = list_files(client, bucket, prefix, pattern).await?;
+    
+    info!("Found {} files to download", all_objects.len());
+    
+    let mut files_to_download = Vec::new();
+    for key in all_objects {
+        let relative_path = key.strip_prefix(prefix).unwrap_or(&key);
+        files_to_download.push((key.clone(), relative_path.to_string()));
+    }
+    
+    // Download files concurrently with a limit of 4
+    let semaphore = Arc::new(Semaphore::new(4));
+    let mut set = JoinSet::new();
+    
+    for (key, filename) in files_to_download {
+        let dest_path = Path::new(destination_dir).join(&filename);
+        let dest_str = dest_path.to_string_lossy().to_string();
+        
+        let permit = Arc::clone(&semaphore).acquire_owned().await?;
+        let client_clone = client.clone();
+        let bucket_clone = bucket.to_string();
+        
+        info!("Downloading {} to {}", key, dest_str);
+        
+        set.spawn(async move {
+            let _permit = permit;
+            
+            match download_large_file(&client_clone, &bucket_clone, &key, &dest_str).await {
+                Ok(_) => {
+                    info!("Successfully downloaded {}", key);
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Failed to download {}: {}", key, e);
+                    // Return error but we'll handle it to continue with other files
+                    Err(e)
+                }
+            }
+        });
+    }
+    
+    // Wait for all downloads to complete, continuing on individual errors
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(download_result) => {
+                // Ignore individual download failures, just log them
+                let _ = download_result;
+            }
+            Err(e) => {
+                error!("Task panicked or failed to join: {}", e);
+            }
+        }
+    }
+    
     Ok(())
 }
 
@@ -303,29 +399,72 @@ pub async fn is_file_exists(client: &Client, bucket: &str, prefix: &str) -> Resu
     }
 }
 
-pub async fn list_files(client: &Client, bucket: &str, prefix: &str) -> Result<Vec<String>, anyhow::Error> {
+pub async fn list_files(client: &Client, bucket: &str, prefix: &str, pattern: Option<&str>) -> Result<Vec<String>, anyhow::Error> {
     let mut list = Vec::new();
+    let matcher = pattern.map(|p| WildMatch::new(p));
 
+    let mut response = client.list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(10)
+        .delimiter("/")
+        .into_paginator()
+        .send();
 
-        let mut response = client.list_objects_v2()
-            .bucket(bucket)
-            .prefix(prefix)
-            .max_keys(10)
-            .into_paginator()
-            .send();
-
-        while let Some(result) = response.next().await {
-            match result {
-                Ok(output) => {
-                    for object in output.contents() {
-                        list.push(object.key().unwrap_or_default().to_string());
+    while let Some(result) = response.next().await {
+        match result {
+            Ok(output) => {
+                // List files in current folder
+                for object in output.contents() {
+                    let key = object.key().unwrap_or_default();
+                    
+                    // Get relative path from prefix
+                    let relative_path = key.strip_prefix(prefix).unwrap_or(key);
+                    
+                    // Skip if empty
+                    if relative_path.is_empty() {
+                        continue;
                     }
-                },
-                Err(err) => {
-                    return Err(anyhow!("error {:?}", err));
+                    
+                    // Apply pattern matching if provided
+                    if let Some(ref m) = matcher {
+                        if !m.matches(relative_path) {
+                            continue;
+                        }
+                    }
+                    
+                    list.push(key.to_string());
                 }
+                
+                // List subfolders (common prefixes)
+                for common_prefix in output.common_prefixes() {
+                    if let Some(folder_key) = common_prefix.prefix() {
+                        let relative_path = folder_key.strip_prefix(prefix).unwrap_or(folder_key);
+                        
+                        // Skip if empty
+                        if relative_path.is_empty() {
+                            continue;
+                        }
+                        
+                        // Remove trailing slash for pattern matching
+                        let folder_name = relative_path.trim_end_matches('/');
+                        
+                        // Apply pattern matching if provided
+                        if let Some(ref m) = matcher {
+                            if !m.matches(folder_name) {
+                                continue;
+                            }
+                        }
+                        
+                        list.push(folder_key.to_string());
+                    }
+                }
+            },
+            Err(err) => {
+                return Err(anyhow!("error {:?}", err));
             }
         }
+    }
     Ok(list)
 }
 
