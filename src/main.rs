@@ -117,12 +117,6 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn upload_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, source: &PathBuf, destination: &str) -> Result<(), anyhow::Error> {
- //   	TS_UAT_ACCESS_KEY := "00507fad99e41ff0000000002"
-	// TS_UAT_SECRET := "K005K8xo6A5znxM9bW7TyoOleRudCJo"
-	// TS_UAT_ENDPOINT := "https://s3.us-east-005.backblazeb2.com"
-	// TS_UAT_BUCKET := "vorrarit-demo-bucket"
-	// TS_UAT_LIST_PATH := "data/"
-
 	let mut destination: String = destination.to_string();
     if destination.starts_with("/") {
         return Err(anyhow!("Destination must not begin with /"));
@@ -131,11 +125,6 @@ async fn upload_command(settings: &settings::Settings, client: &aws_sdk_s3::Clie
         destination.push('/');
     }
 
-    // let client = s3::build_s3_client(
-    //     "00507fad99e41ff0000000002",
-    //     "K005K8xo6A5znxM9bW7TyoOleRudCJo",
-    //     "ap-southeast-2",
-    //     "https://s3.us-east-005.backblazeb2.com").await;
     let src = source.as_os_str().to_str().ok_or(anyhow!("cannot get source path {}", source.display()))?;
     s3::upload_large_file(&client, &settings.bucket_name, &destination, src).await
 }
@@ -170,12 +159,6 @@ async fn download_command(settings: &settings::Settings, client: &aws_sdk_s3::Cl
     if source.starts_with("/") {
         return Err(anyhow!("Source must not begin with /"));
     }
-
-    // let client = s3::build_s3_client(
-    //     "00507fad99e41ff0000000002",
-    //     "K005K8xo6A5znxM9bW7TyoOleRudCJo",
-    //     "ap-southeast-2",
-    //     "https://s3.us-east-005.backblazeb2.com").await;
 
     let dest = destination.as_os_str().to_str().ok_or(anyhow!("cannot get destination path {}", destination.display()))?;
     s3::download_large_file(&client, &settings.bucket_name, source, dest).await
@@ -231,12 +214,6 @@ async fn list_command(settings: &settings::Settings, client: &aws_sdk_s3::Client
         folder_prefix.push('/');
     }
 
-    // let client = s3::build_s3_client(
-    //     "00507fad99e41ff0000000002",
-    //     "K005K8xo6A5znxM9bW7TyoOleRudCJo",
-    //     "ap-southeast-2",
-    //     "https://s3.us-east-005.backblazeb2.com").await;
-
     let list = s3::list_files(client, &settings.bucket_name, &folder_prefix, pattern).await?;
     info!("Files with prefix '{}':", prefix);
     for file in list {
@@ -251,12 +228,6 @@ async fn set_content_type_command(settings: &settings::Settings, client: &aws_sd
         return Err(anyhow!("Key must not begin with /"));
     }
 
-    // let client = s3::build_s3_client(
-    //     "00507fad99e41ff0000000002",
-    //     "K005K8xo6A5znxM9bW7TyoOleRudCJo",
-    //     "ap-southeast-2",
-    //     "https://s3.us-east-005.backblazeb2.com").await;
-
     s3::update_object_content_type(client, &settings.bucket_name, key, content_type).await?;
 
     Ok(())
@@ -269,12 +240,6 @@ async fn move_object_command(settings: &settings::Settings, client: &aws_sdk_s3:
     if destination_key.starts_with("/") {
         return Err(anyhow!("Destination key must not begin with /"));
     }
-
-    // let client = s3::build_s3_client(
-    //     "00507fad99e41ff0000000002",
-    //     "K005K8xo6A5znxM9bW7TyoOleRudCJo",
-    //     "ap-southeast-2",
-    //     "https://s3.us-east-005.backblazeb2.com").await;
 
     s3::move_object(client, &settings.bucket_name, &source_key, &destination_key).await?;
 
