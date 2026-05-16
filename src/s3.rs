@@ -69,7 +69,11 @@ async fn get_upload_file_info(prefix: &str, source_filename: &str) -> Result<Upl
             .to_str()
             .ok_or(anyhow!("Cannot get filename string {}", source_filename))?;
 
-    let key = format!("{}{}", prefix, filename);
+    let key = if prefix.ends_with('/') {
+        format!("{}{}", prefix, filename)
+    } else {
+        prefix.to_string()
+    };
 
     let src_file = tokio::fs::File::open(path).await.expect("Failed to open file");
 

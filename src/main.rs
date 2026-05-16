@@ -117,16 +117,11 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn upload_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, source: &PathBuf, destination: &str) -> Result<(), anyhow::Error> {
-	let mut destination: String = destination.to_string();
     if destination.starts_with("/") {
         return Err(anyhow!("Destination must not begin with /"));
     }
-    if !destination.ends_with("/") {
-        destination.push('/');
-    }
-
     let src = source.as_os_str().to_str().ok_or(anyhow!("cannot get source path {}", source.display()))?;
-    s3::upload_large_file(&client, &settings.bucket_name, &destination, src).await
+    s3::upload_large_file(&client, &settings.bucket_name, destination, src).await
 }
 
 async fn upload_folder_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, source: &PathBuf, destination: &str) -> Result<(), anyhow::Error> {
