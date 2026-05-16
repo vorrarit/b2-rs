@@ -150,13 +150,21 @@ async fn upload_folder_command(settings: &settings::Settings, client: &aws_sdk_s
 }
 
 async fn download_command(settings: &settings::Settings, client: &aws_sdk_s3::Client, source: &str, destination: &PathBuf) -> Result<(), anyhow::Error> {
-
     if source.starts_with("/") {
         return Err(anyhow!("Source must not begin with /"));
     }
 
-    let dest = destination.as_os_str().to_str().ok_or(anyhow!("cannot get destination path {}", destination.display()))?;
-    s3::download_large_file(&client, &settings.bucket_name, source, dest).await
+    let dest_str = destination.as_os_str().to_str()
+        .ok_or(anyhow!("cannot get destination path {}", destination.display()))?;
+
+    let dest = if dest_str.ends_with('/') || destination.is_dir() {
+        let filename = source.split('/').last().unwrap_or(source);
+        format!("{}{}", dest_str.trim_end_matches('/'), filename)
+    } else {
+        dest_str.to_string()
+    };
+
+    s3::download_large_file(&client, &settings.bucket_name, source, &dest).await
 }
 
 async fn download_folder_command(
@@ -188,6 +196,7 @@ async fn download_folder_command(
 
     let dest_str = destination.as_os_str().to_str()
         .ok_or(anyhow!("Cannot get destination path {}", destination.display()))?;
+    let dest_str = dest_str.trim_end_matches('/');
 
     s3::download_folder_files(
         client,
