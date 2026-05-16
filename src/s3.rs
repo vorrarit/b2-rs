@@ -1,9 +1,10 @@
-use std::{collections::BTreeMap, fs, io::SeekFrom, path::Path, sync::Arc};
+use std::{collections::BTreeMap, fs, io::SeekFrom, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, anyhow};
 use aws_config::{Region, retry::RetryConfig};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{Client, config::{SharedCredentialsProvider, retry::ReconnectMode}, error::SdkError, primitives::ByteStream, types::{CompletedMultipartUpload, CompletedPart}};
+use aws_smithy_types::timeout::TimeoutConfig;
 use bytes::Bytes;
 use http::{HeaderValue};
 use mimetype_detector::{detect_file};
@@ -14,11 +15,17 @@ use wildmatch::WildMatch;
 
 pub async fn build_s3_client(access_key: &str, secret_key: &str, region: &str, endpoint: &str) -> aws_sdk_s3::Client {
     let credentials = Credentials::from_keys(access_key, secret_key, None);
+    let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .operation_timeout(Duration::from_secs(300))
+            .build();
+
     let config = aws_config::from_env()
             .region(Region::new(region.to_string()))
             .credentials_provider(SharedCredentialsProvider::new(credentials))
             .endpoint_url(endpoint)
             .retry_config(RetryConfig::standard().with_reconnect_mode(ReconnectMode::ReuseAllConnections))
+            .timeout_config(timeout_config)
             .load()
             .await;
 
