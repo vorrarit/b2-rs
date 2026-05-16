@@ -170,7 +170,9 @@ pub async fn upload_large_file(client: &Client, bucket: &str, prefix: &str, sour
             Ok((part, outcome)) => {
                 match outcome {
                     Ok(upload_part_res) => {
-                        completed_data.insert(part, upload_part_res.e_tag.unwrap_or_default());
+                        let e_tag = upload_part_res.e_tag
+                            .ok_or_else(|| anyhow!("Missing ETag in upload_part response for part {}", part))?;
+                        completed_data.insert(part, e_tag);
                     }
                     Err(e) => {
                         return Err(anyhow!("Error uploading part {}: {}", part_number, e));
